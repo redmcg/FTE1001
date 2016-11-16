@@ -32,9 +32,9 @@ Byte 3, bits 7   - Type of contact!? 0 - Touch, 1 - Palm?
 Byte 3, bits 6-4 - Width of the touch? (all ones if Palm)
 Byte 3, bits 3-0 - All ones if Palm - otherwise zero?
 Byte 4, bits 7   - Type of contact!? 0 - Touch, 1 - Palm?
-Byte 4, bits 6-0 - Proximity?
+Byte 4, bits 6-0 - Pressure?
 
-I'm not 100% about byte 3 and 4. These are not currently used in the proof of concept driver (but may be added later).
+I'm not 100% about byte 3 and 4 - but they are now being used for the values of TOOL_WIDTH, MT_TOOL_TYPE, MT_TOUCH_MAJOR and MT_PRESSURE.
 
 The location of the contact information is in the left most bytes. So the first contact is in the first five, the second contact in the next five and so on.
 
