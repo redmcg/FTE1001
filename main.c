@@ -39,12 +39,17 @@
 #include <errno.h>
 
 #define MAX_CONTACTS 5
-#define MAX_EVENTS (4 + 4*MAX_CONTACTS + 2)
+#define MAX_CONTACT_EVENTS 7
+#define EVERY_TIME_EVENTS 4
+#define ONE_OFF_EVENTS 3
+#define MAX_EVENTS (EVERY_TIME_EVENTS + MAX_CONTACT_EVENTS*MAX_CONTACTS + ONE_OFF_EVENTS)
 
 #define CONTACT_SIZE 5	
 
 #define MAX_X 0x0aea
 #define MAX_Y 0x06de
+#define MAX_TOUCH_MAJOR 8
+#define MAX_PRESSURE 0x80
 
 int createUIDev(int ifd) {
 	int res = ioctl(ifd, UI_SET_EVBIT, EV_SYN);
@@ -58,10 +63,14 @@ int createUIDev(int ifd) {
 	res = ioctl(ifd, UI_SET_EVBIT, EV_ABS);
 	res = ioctl(ifd, UI_SET_ABSBIT, ABS_X);
 	res = ioctl(ifd, UI_SET_ABSBIT, ABS_Y);
+	res = ioctl(ifd, UI_SET_ABSBIT, ABS_TOOL_WIDTH);
 	res = ioctl(ifd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
 	res = ioctl(ifd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
 	res = ioctl(ifd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
 	res = ioctl(ifd, UI_SET_ABSBIT, ABS_MT_SLOT);
+	res = ioctl(ifd, UI_SET_ABSBIT, ABS_MT_TOOL_TYPE);
+	res = ioctl(ifd, UI_SET_ABSBIT, ABS_MT_TOUCH_MAJOR);
+	res = ioctl(ifd, UI_SET_ABSBIT, ABS_MT_PRESSURE);
 	res = ioctl(ifd, UI_SET_PROPBIT, INPUT_PROP_POINTER);
 	res = ioctl(ifd, UI_SET_PROPBIT, INPUT_PROP_BUTTONPAD);
 
@@ -72,11 +81,12 @@ int createUIDev(int ifd) {
 	uidev.id.vendor  = 0x0b05;
 	uidev.id.product = 0x0101;
 	uidev.id.version = 1;
-	uidev.absmin[ABS_X] = uidev.absmin[ABS_MT_POSITION_X] = 0;
-	uidev.absmin[ABS_Y] = uidev.absmin[ABS_MT_POSITION_Y] = 0;
 	uidev.absmax[ABS_X] = uidev.absmax[ABS_MT_POSITION_X] = MAX_X;
 	uidev.absmax[ABS_Y] = uidev.absmax[ABS_MT_POSITION_Y] = MAX_Y;
 	uidev.absmax[ABS_MT_SLOT] = MAX_CONTACTS - 1;
+	uidev.absmax[ABS_MT_TOOL_TYPE] = MT_TOOL_MAX;
+	uidev.absmax[ABS_MT_TOUCH_MAJOR] = uidev.absmax[ABS_TOOL_WIDTH] = MAX_TOUCH_MAJOR;
+	uidev.absmax[ABS_MT_PRESSURE] = MAX_PRESSURE;
 
 	res = write(ifd, &uidev, sizeof(uidev));
 
@@ -103,8 +113,11 @@ int startMultiTouch(int fd) {
 int mainLoop(int fd, int ifd) {
 	unsigned char buf[28];
 	int i, res, trackingid = 0;
-	int contacts[MAX_CONTACTS];
-	for (i = 0; i < MAX_CONTACTS; i++) contacts[i] = -1;
+	struct contacts_t {
+		int trackingId;
+		int toolType;
+	} contacts[MAX_CONTACTS];
+	for (i = 0; i < MAX_CONTACTS; i++) contacts[i].trackingId = -1;
 
         while(1) {
 		res = read(fd, buf, sizeof(buf));
@@ -114,6 +127,7 @@ int mainLoop(int fd, int ifd) {
 			struct input_event ev[MAX_EVENTS];
                         int contact = 0;
 			int eventNum = 0, contactNum = 0;
+			int toolType;
 
 			memset(&ev, 0, sizeof(ev));
 
@@ -121,27 +135,37 @@ int mainLoop(int fd, int ifd) {
 				int report = 0;
 				if (buf[1] & (0x08 << i)) {
 					report = contact = 1;
-					if (contacts[i] == -1) {
-						contacts[i] = trackingid++;
+					toolType = buf[5 + contactNum*CONTACT_SIZE] & 0x80 ? MT_TOOL_PALM : MT_TOOL_FINGER;
+					if (contacts[i].trackingId == -1 || contacts[i].toolType != toolType) {
+						contacts[i].trackingId = trackingid++;
+						contacts[i].toolType = toolType;
 						if (trackingid < 0) trackingid = 0;
 					}
 
-				} else if (contacts[i] != -1) {
+				} else if (contacts[i].trackingId != -1) {
 					report = 1;
-					contacts[i] = -1;
+					contacts[i].trackingId = -1;
 				}
 
 				if (report) {
+					/* The next seven events could occur for every event - hence MAX_CONTACT_EVENTS is 7 */
 					ev[eventNum].type = EV_ABS;
 					ev[eventNum].code = ABS_MT_SLOT;
 					ev[eventNum++].value = i;
 					ev[eventNum].type = EV_ABS;
 					ev[eventNum].code = ABS_MT_TRACKING_ID;
-					ev[eventNum++].value = contacts[i];
+					ev[eventNum++].value = contacts[i].trackingId;
+					ev[eventNum].type = EV_ABS;
+					ev[eventNum].code = ABS_MT_TOOL_TYPE;
+					ev[eventNum++].value = contacts[i].toolType;
 
-					if (contacts[i] >= 0) {
+					if (contacts[i].trackingId >= 0) {
 	                        		int x = ((buf[2 + contactNum*CONTACT_SIZE] >> 4) << 8) | buf[3 + contactNum*CONTACT_SIZE];
        		                		int y = MAX_Y - (((buf[2 + contactNum*CONTACT_SIZE] & 0x0f) << 8) | buf[4 + contactNum*CONTACT_SIZE]);
+						int touchMajor = toolType == MT_TOOL_FINGER ? (buf[5 + contactNum*CONTACT_SIZE] >> 4) & 0x07 : MAX_TOUCH_MAJOR;
+						int pressure = toolType == MT_TOOL_FINGER ? buf[6 + contactNum*CONTACT_SIZE] & 0x7f : MAX_PRESSURE;
+
+						// if (touchMajor != 1 || pressure != 0x7f || toolType != MT_TOOL_FINGER) printf("slot %d: tool = %s, touchMajor = %d, pressure = %02x, raw = %02x%02x\n", i, toolType == MT_TOOL_FINGER ? "Finger" : "Palm", touchMajor, pressure, buf[5 + contactNum*CONTACT_SIZE], buf[6 + contactNum*CONTACT_SIZE]);
 
 						ev[eventNum].type = EV_ABS;
 						ev[eventNum].code = ABS_MT_POSITION_X;
@@ -149,14 +173,24 @@ int mainLoop(int fd, int ifd) {
 						ev[eventNum].type = EV_ABS;
 						ev[eventNum].code = ABS_MT_POSITION_Y;
 						ev[eventNum++].value = y;
+						ev[eventNum].type = EV_ABS;
+						ev[eventNum].code = ABS_MT_TOUCH_MAJOR;
+						ev[eventNum++].value = touchMajor;
+						ev[eventNum].type = EV_ABS;
+						ev[eventNum].code = ABS_MT_PRESSURE;
+						ev[eventNum++].value = pressure;
 
                         			if (contactNum == 0) {
+							/* These three events are one offs (they're not MT) - hence ONE_OFF_EVENTS is 3 */
 							ev[eventNum].type = EV_ABS;
 							ev[eventNum].code = ABS_X;
 							ev[eventNum++].value = x;
 							ev[eventNum].type = EV_ABS;
 							ev[eventNum].code = ABS_Y;
 							ev[eventNum++].value = y;
+							ev[eventNum].type = EV_ABS;
+							ev[eventNum].code = ABS_TOOL_WIDTH;
+							ev[eventNum++].value = touchMajor;
 						}
 					}
 				}
@@ -164,6 +198,7 @@ int mainLoop(int fd, int ifd) {
 				if (buf[1] & (0x08 << i)) contactNum++; 
 			}
 
+			/* These four events will always occur - thus EVERY_TIME_EVENTS is 4 */
 			ev[eventNum].type = EV_KEY;
 			ev[eventNum].code = BTN_TOUCH;
 			ev[eventNum++].value = contact;
